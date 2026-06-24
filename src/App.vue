@@ -1,7 +1,15 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+// import { computed } from 'vue';
 import MarkdownIt from 'markdown-it';
 import DOMPurify from 'dompurify';
+
+import { ref, onMounted, nextTick, computed, watch } from 'vue';
+import { getModel, ollamaService, setModel } from '@/services/ollama';
+import { formatBytes, isUrl } from '@/utils/data';
+import { getBaseUrl, setBaseUrl } from '@/services/ollama';
+
+const baseUrl = ref<string | null>(null);
+const currentModel = ref<string | null>(null);
 
 // Initialize markdown-it with security defaults
 const md = new MarkdownIt({
@@ -14,7 +22,7 @@ const parseMd = (value: any) => {
     const rawHtml = md.render(typeof value === 'string' ? value : '');
 
     return DOMPurify.sanitize(rawHtml, {
-        ALLOWED_TAGS: ['hr', 'br', 'p', 'a', 'img', 'span', 'pre', 'code', 'kbd', 'a'],
+        ALLOWED_TAGS: ['hr', 'br', 'p', 'a', 'img', 'span', 'pre', 'code', 'kbd'],
         ALLOWED_ATTR: ['href', 'src', 'alt', 'title', 'class', 'target'],
     });
 };
@@ -24,10 +32,6 @@ const parseMd = (value: any) => {
 // Safely compute the HTML output
 // const renderedHtml = computed(() => parseMd(rawMarkdown))
 
-import { ref, onMounted, nextTick } from 'vue';
-import { ollamaService } from './services/ollama';
-import type { OllamaRequest, OllamaResponse } from '@/types/ollama';
-
 interface Message {
     id: number;
     role: 'user' | 'assistant';
@@ -36,52 +40,14 @@ interface Message {
     timestamp: Date | string;
 }
 
-const demoResponses = ref<OllamaResponse[]>([
-    {
-        model: 'deepseek-r1:1.5b',
-        created_at: '2026-06-24T05:54:19.242648552Z',
-        response: '¡Hola! ¿En qué puedo ayudarte hoy? 😊',
-        done: true,
-        done_reason: 'stop',
-        context: [
-            151644, 337, 1953, 151645, 151648, 271, 151649, 271, 39832, 68012, 0, 28286, 1702, 42288, 80815, 58137,
-            19840, 48741, 30, 26525, 232,
-        ],
-        total_duration: 694568631,
-        load_duration: 119811920,
-        prompt_eval_count: 5,
-        prompt_eval_duration: 43991876,
-        eval_count: 18,
-        eval_duration: 508970317,
-    },
-    {
-        model: 'mistral:latest',
-        created_at: '2026-06-24T06:10:19.828675941Z',
-        response:
-            " Um exemplo de uso do `for...of` para iterar sobre um array em JavaScript é:\n\n```javascript\nlet fruits = ['apple', 'banana', 'orange'];\n\nfor (let fruit of fruits) {\n  console.log(fruit);\n}\n```\n\nNeste exemplo, o `for...of` é usado para iterar sobre cada item no array `fruits`. O loop irá executar três vezes (uma vez por cada item do array), e imprimirá cada fruta no console. É um loop muito fácil de entender e usar, pois ele se comporta similarmente aos loops em outras linguagens de programação como C++ ou Python.",
-        done: true,
-        done_reason: 'stop',
-        context: [
-            3, 29473, 1296, 1049, 29644, 3973, 19456, 29477, 1108, 1122, 1070, 1108, 3061, 1645, 1229, 1262, 16135, 4,
-            29473, 13282, 19456, 29477, 1108, 28195, 1279, 2320, 2160, 1869, 1777, 29600, 3414, 7622, 1051, 8237, 3973,
-            3061, 1645, 27049, 2001, 29515, 781, 781, 14708, 29600, 20936, 781, 1663, 22334, 1095, 6704, 24943, 1415,
-            1232, 4395, 3006, 1415, 1232, 1039, 1677, 9921, 781, 781, 2160, 1093, 1663, 11375, 1070, 22334, 29499, 1139,
-            781, 29473, 6689, 29491, 2350, 29500, 29490, 7192, 1112, 781, 29520, 781, 14708, 29600, 781, 781, 29527,
-            8707, 19456, 29477, 29493, 1057, 2320, 2160, 1869, 1777, 29600, 2001, 1360, 2220, 3414, 7622, 1051, 8237,
-            14918, 3283, 1476, 3061, 2320, 29490, 1319, 1814, 10197, 1219, 8638, 4907, 29588, 5314, 1051, 1235, 17962,
-            10821, 1042, 1093, 10857, 10821, 2727, 14918, 3283, 1279, 3061, 1325, 1085, 1271, 16647, 1129, 29588, 14918,
-            1872, 12241, 1476, 6689, 29491, 5694, 3973, 8638, 9221, 3836, 1053, 29588, 5640, 1108, 1704, 3109, 1085,
-            1360, 1051, 29493, 2395, 1046, 6707, 1195, 28260, 29476, 4452, 5147, 1032, 1153, 29241, 1645, 1343, 6663,
-            24785, 1125, 1364, 1108, 2775, 10192, 3886, 1102, 2448, 4234, 22134, 29491,
-        ],
-        total_duration: 24621005068,
-        load_duration: 3390438864,
-        prompt_eval_count: 19,
-        prompt_eval_duration: 862242288,
-        eval_count: 166,
-        eval_duration: 20321344250,
-    },
-]);
+const handleSetBaseUrl = (e: Event) => {
+    if (!isUrl(baseUrl.value)) {
+        return;
+    }
+
+    setBaseUrl(baseUrl.value);
+    loadModels();
+};
 
 const demoMessages = ref<Message[]>([
     {
@@ -120,8 +86,9 @@ const messages = ref<Message[]>([]);
 const loading = ref(false);
 const status = ref('');
 const statusType = ref<'error' | 'success' | 'info'>('info');
-const selectedModel = ref('mistral');
-const models = ref<string[]>([]);
+const selectedModel = ref<any>(null);
+const selectedModelName = computed(() => selectedModel.value?.name);
+const models = ref<any[]>([]);
 let messageCounter = 0;
 
 const formatTime = (date: Date | string | null) => {
@@ -143,11 +110,11 @@ const formatTime = (date: Date | string | null) => {
 const loadModels = async () => {
     try {
         setStatus('Carregando modelos...', 'info');
-        const loadedModels = await ollamaService.listModels();
+        const loadedModels = await ollamaService.listModels(baseUrl.value);
         if (loadedModels.length > 0) {
             models.value = loadedModels;
-            if (!selectedModel.value || !loadedModels.includes(selectedModel.value)) {
-                selectedModel.value = loadedModels[0];
+            if (!selectedModelName.value || !loadedModels.includes(selectedModelName.value)) {
+                selectedModel.value = loadedModels[0] || null;
             }
             setStatus(`${loadedModels.length} modelo(s) disponível(is)`, 'success');
         } else {
@@ -168,7 +135,7 @@ const send = async () => {
         id: ++messageCounter,
         role: 'user',
         text: userMessage,
-        model: `${selectedModel.value}`,
+        model: `${selectedModelName.value}`,
         timestamp: new Date(),
     });
 
@@ -176,7 +143,7 @@ const send = async () => {
     setStatus('', 'info');
 
     try {
-        const response = await ollamaService.ask(userMessage, selectedModel.value);
+        const response = await ollamaService.ask(userMessage, selectedModelName.value);
         messages.value.push({
             id: ++messageCounter,
             role: 'assistant',
@@ -224,8 +191,54 @@ const loadPreviousMessages = async () => {
     }
 };
 
+watch(
+    () => selectedModel.value,
+    (newValue, oldValue) => {
+        console.log('changed value', { newValue, oldValue });
+        setModel(newValue?.name);
+    }
+    // { deep: true }
+);
+
+const loadCurrentModel = async () => {
+    let _currentModel = getModel() || currentModel.value;
+
+    if (!models.value?.length) {
+        await loadModels();
+    }
+
+    console.log('models.value?.length', models.value?.length, models.value);
+
+    _currentModel = String(_currentModel || '')?.trim();
+
+    if (_currentModel) {
+        let _currentModelData = models.value?.find((item: any) => {
+            return item?.name === _currentModel;
+        })
+
+        if (_currentModelData) {
+            selectedModel.value = _currentModelData
+        }
+
+        console.log('_currentModelData', _currentModelData);
+        //
+    }
+
+    console.log('_currentModel', _currentModel);
+    currentModel.value = _currentModel || currentModel.value || getModel();
+    console.log('currentModel.value', currentModel.value);
+
+    setModel(_currentModel || null);
+};
+
 onMounted(async () => {
-    loadModels();
+    baseUrl.value = getBaseUrl();
+    await loadCurrentModel();
+
+    if (!models.value?.length) {
+        loadModels();
+    }
+
     loadPreviousMessages();
 });
 </script>
@@ -242,7 +255,50 @@ textarea {
             <!-- Header -->
             <div class="mb-8 pt-8">
                 <h1 class="text-4xl font-bold text-white mb-2">💬 Chat com Ollama</h1>
-                <p class="text-slate-400">Usando modelo {{ selectedModel }} rodando localmente</p>
+                <div class="text-slate-400 flex flex-row gap-2 flex-wrap min-h-12 justify-between align-middle">
+                    <div class="w-full md:w-5/12 border border-gray-600 rounded-sm py-1 px-2">
+                        <span class="pe-2">Base URL:</span>
+                        <span class="select-all text-white">{{ baseUrl }}</span>
+                    </div>
+
+                    <div class="w-full md:w-6/12 border border-gray-600 rounded-sm py-1 px-2">
+                        <span class="pe-2">Selected model:</span>
+                        <span class="text-white">{{ selectedModel?.name }}</span>
+                    </div>
+
+                    <div class="w-full md:w-3/12 border border-gray-600 rounded-sm py-1 px-2">
+                        <span class="pe-2">Quantization level:</span>
+                        <span class="text-white">
+                            {{
+                                selectedModel?.details?.quantization_level
+                                    ? `(${selectedModel?.details?.quantization_level})`
+                                    : ''
+                            }}
+                        </span>
+                    </div>
+
+                    <div class="w-full md:w-3/12 border border-gray-600 rounded-sm py-1 px-2">
+                        <span class="pe-2">Parameter size:</span>
+                        <span class="text-white">
+                            {{
+                                selectedModel?.details?.parameter_size
+                                    ? `(${selectedModel?.details?.parameter_size})`
+                                    : ''
+                            }}
+                        </span>
+                    </div>
+
+                    <div class="w-full md:w-3/12 border border-gray-600 rounded-sm py-1 px-2">
+                        <span class="pe-2">Image size:</span>
+                        <span class="text-white">
+                            {{
+                                selectedModel?.size
+                                    ? `${formatBytes(selectedModel?.size) || '-'}`
+                                    : ''
+                            }}
+                        </span>
+                    </div>
+                </div>
             </div>
 
             <!-- Status -->
@@ -261,31 +317,46 @@ textarea {
             </div>
 
             <div class="flex gap-6 mb-3 justify-between">
-                <div class="w-7/12 flex gap-4 justify-between">
+                <div class="w-8/12 flex gap-4 justify-between">
                     <div class="w-full flex gap-2">
                         <input
-                            type="text"
-                            url=""
+                            type="url"
+                            v-model="baseUrl"
                             placeholder="http://localhost:11434/api"
+                            @keydown.prevent.enter="handleSetBaseUrl"
                             class="w-full px-3 py-2 bg-slate-700 text-white rounded text-sm border border-slate-600 focus:border-blue-500 focus:outline-none disabled:opacity-50"
                         />
                         <button
                             type="button"
-                            class="w-2/12 px-3 py-2 bg-slate-700 text-slate-300 rounded text-sm border border-slate-600 hover:bg-slate-600 disabled:opacity-50 transition"
+                            :disabled="!isUrl(baseUrl)"
+                            @click.prevent.stop="handleSetBaseUrl"
+                            :class="[
+                                'w-2/12 px-3 py-2 text-slate-300 rounded text-sm border border-slate-600 hover:bg-slate-600 disabled:opacity-50 transition',
+                                {
+                                    'bg-slate-700/30 opacity-30 cursor-not-allowed': !isUrl(baseUrl),
+                                    'bg-slate-700': isUrl(baseUrl),
+                                },
+                            ]"
                         >
                             Ok
                         </button>
                     </div>
                 </div>
 
-                <div class="flex gap-2 justify-between">
+                <div class="w-full flex gap-2 justify-between">
                     <select
                         v-model="selectedModel"
                         :disabled="loading"
                         class="w-10/12 px-3 py-2 bg-slate-700 text-white rounded text-sm border border-slate-600 focus:border-blue-500 focus:outline-none disabled:opacity-50"
                     >
                         <option v-for="model in models" :key="model" :value="model">
-                            {{ model }}
+                            {{
+                                model?.details?.quantization_level
+                                    ? `${model?.name}:${model?.details?.quantization_level}`
+                                    : model?.name
+                            }}
+                            {{ model?.details?.parameter_size ? `(${model?.details?.parameter_size})` : '' }}
+                            {{ model?.details?.parameter_size ? `${formatBytes(model?.size) || '-'}` : '' }}
                         </option>
                     </select>
 
@@ -386,7 +457,14 @@ textarea {
                         <button
                             @click="send"
                             :disabled="loading || !input.trim()"
-                            class="px-4 py-2 bg-blue-600 text-white rounded font-medium hover:bg-blue-700 disabled:bg-slate-600 disabled:cursor-not-allowed transition whitespace-nowrap"
+                            :class="[
+                                'px-4 py-2 bg-blue-600 text-white rounded font-medium hover:bg-blue-700 disabled:bg-slate-600 disabled:cursor-not-allowed transition whitespace-nowrap',
+                                {
+                                    'bg-slate-700/30 opacity-30 cursor-not-allowed':
+                                        !isUrl(baseUrl) || loading || !input.trim(),
+                                    'bg-slate-700': isUrl(baseUrl) && !loading && input.trim(),
+                                },
+                            ]"
                         >
                             <span>{{ loading ? '⏳' : '📤' }}</span>
                             <span>Enviar</span>

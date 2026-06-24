@@ -56,7 +56,7 @@ export default defineConfig(({ command, mode }) => {
             ...configBase,
             // Example: use an env var to set the dev server port conditionally.
             server: {
-                port: env.APP_PORT ? Number(env.APP_PORT) : 5173,
+                port: env.APP_PORT ? (Number(env.APP_PORT) || 5173) : 5173,
                 watcher: {
                     awaitWriteFinish: true,
 
@@ -78,6 +78,10 @@ export default defineConfig(({ command, mode }) => {
                     'app.local.mkpayments.com.br',
                     //
                 ],
+            },
+            hmr: {
+                host: 'localhost', // ou o hostname que o browser está usando
+                port: env.APP_PORT ? (Number(env.APP_PORT) || 5173) : 5173,
             },
         };
     }
