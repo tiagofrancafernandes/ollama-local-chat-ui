@@ -1,0 +1,16 @@
+@import 'tailwindcss';
+@plugin "@tailwindcss/forms";
+@plugin "@tailwindcss/typography";
+
+* {
+    @apply antialiased;
+}
+
+[data-markdown-type='container'].prose code {
+    @apply text-gray-400 font-mono;
+    /* color: white; */
+}
+
+button:not([disabled]) {
+    @apply cursor-pointer;
+}
