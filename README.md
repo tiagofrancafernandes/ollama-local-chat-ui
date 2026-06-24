@@ -151,5 +151,8 @@ const models = await ollamaService.listModels()
 - Customizar prompt system
 
 ---
+### Custom proxy
+Se tiver com problema para acessar o host local, teste habilotar CORS do Ollama Server ou pode usar um proxy local. Eu criei um pequeno projeto com um proxy [bem simples](https://github.com/tiagofrancafernandes/ollama-custom-proxy)
+---
 
 **Criado com Claude Code** 🤖
