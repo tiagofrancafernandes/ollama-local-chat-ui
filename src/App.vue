@@ -1,493 +1,881 @@
 <script setup lang="ts">
-// import { computed } from 'vue';
-import MarkdownIt from 'markdown-it';
 import DOMPurify from 'dompurify';
+import MarkdownIt from 'markdown-it';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import { toast } from 'vue3-toastify';
 
-import { ref, onMounted, nextTick, computed, watch } from 'vue';
-import { getModel, ollamaService, setModel } from '@/services/ollama';
-import { formatBytes, isUrl } from '@/utils/data';
-import { getBaseUrl, setBaseUrl } from '@/services/ollama';
+import { ollamaService, setBaseUrl } from '@/services/ollama';
+import {
+    chatStore,
+    createConversationTitle,
+    type ChatConversation,
+    type ChatMessage,
+    type ChatSettings,
+} from '@/services/chatStore';
+import { isUrl } from '@/utils/data';
 
-const baseUrl = ref<string | null>(null);
-const currentModel = ref<string | null>(null);
+interface ModelItem {
+    name: string;
+    size?: number;
+    details?: {
+        quantization_level?: string;
+        parameter_size?: string;
+    };
+}
 
-// Initialize markdown-it with security defaults
 const md = new MarkdownIt({
-    html: false, // Disables raw HTML input within markdown for safety
-    linkify: true, // Automatically converts text URLs into clickable <a> tags
-    breaks: true, // Converts simple line breaks into <br> tags
+    html: false,
+    linkify: true,
+    breaks: true,
 });
 
-const parseMd = (value: any) => {
-    const rawHtml = md.render(typeof value === 'string' ? value : '');
+const parseMd = (value: string): string => {
+    const rawHtml = md.render(value || '');
 
     return DOMPurify.sanitize(rawHtml, {
-        ALLOWED_TAGS: ['hr', 'br', 'p', 'a', 'img', 'span', 'pre', 'code', 'kbd'],
-        ALLOWED_ATTR: ['href', 'src', 'alt', 'title', 'class', 'target'],
+        ALLOWED_TAGS: [
+            'hr',
+            'br',
+            'p',
+            'a',
+            'img',
+            'span',
+            'pre',
+            'code',
+            'kbd',
+            'ul',
+            'ol',
+            'li',
+            'strong',
+            'em',
+            'blockquote',
+        ],
+        ALLOWED_ATTR: ['href', 'src', 'alt', 'title', 'class', 'target', 'rel'],
     });
 };
 
-// const rawMarkdown = '# Native Markdown\nParsing with *markdown-it*.'
-
-// Safely compute the HTML output
-// const renderedHtml = computed(() => parseMd(rawMarkdown))
-
-interface Message {
-    id: number;
-    role: 'user' | 'assistant';
-    text: string;
-    model?: string;
-    timestamp: Date | string;
-}
-
-const handleSetBaseUrl = (e: Event) => {
-    if (!isUrl(baseUrl.value)) {
-        return;
+const toIsoTime = (value: string | Date | null): string => {
+    if (!value) {
+        return '';
     }
 
-    setBaseUrl(baseUrl.value);
-    loadModels();
-};
-
-const demoMessages = ref<Message[]>([
-    {
-        id: 1,
-        role: 'user',
-        model: 'deepseek-r1:1.5b',
-        timestamp: '2026-06-24T05:54:18.242648552Z',
-        text: 'Olá',
-    },
-    {
-        id: 2,
-        role: 'assistant',
-        model: 'deepseek-r1:1.5b',
-        timestamp: '2026-06-24T05:54:19.242648552Z',
-        text: 'Olá! Em que posso te ajudar? 😊',
-    },
-    {
-        id: 3,
-        role: 'user',
-        text: 'me dê um exemplo de for of de array em javascript',
-        timestamp: '2026-06-24T05:54:19.242648552Z',
-        model: 'deepseek-r1:1.5b',
-    },
-
-    {
-        id: 4,
-        role: 'assistant',
-        model: 'mistral:latest',
-        timestamp: '2026-06-24T06:10:19.828675941Z',
-        text: " Um exemplo de uso do `for...of` para iterar sobre um array em JavaScript é:\n\n```javascript\nlet fruits = ['apple', 'banana', 'orange'];\n\nfor (let fruit of fruits) {\n  console.log(fruit);\n}\n```\n\nNeste exemplo, o `for...of` é usado para iterar sobre cada item no array `fruits`. O loop irá executar três vezes (uma vez por cada item do array), e imprimirá cada fruta no console. É um loop muito fácil de entender e usar, pois ele se comporta similarmente aos loops em outras linguagens de programação como C++ ou Python.",
-    },
-]);
-
-const input = ref('');
-const messages = ref<Message[]>([]);
-const loading = ref(false);
-const status = ref('');
-const statusType = ref<'error' | 'success' | 'info'>('info');
-const selectedModel = ref<any>(null);
-const selectedModelName = computed(() => selectedModel.value?.name);
-const models = ref<any[]>([]);
-let messageCounter = 0;
-
-const formatTime = (date: Date | string | null) => {
-    if (!date) {
-        return null;
-    }
-
-    return new Date(date)?.toLocaleTimeString('pt-BR', {
-        hour12: false,
+    return new Date(value).toLocaleString('pt-BR', {
         day: '2-digit',
         month: '2-digit',
         year: 'numeric',
         hour: '2-digit',
         minute: '2-digit',
-        second: '2-digit',
     });
+};
+
+const baseUrl = ref('http://localhost:11434/api');
+const selectedModel = ref<ModelItem | null>(null);
+const models = ref<ModelItem[]>([]);
+const settings = ref<ChatSettings>({
+    host: 'http://localhost:11434/api',
+    model: 'mistral:latest',
+    defaultSystemMessage: '',
+});
+
+const conversations = ref<ChatConversation[]>([]);
+const activeConversationId = ref<string | null>(null);
+const activeConversation = computed<ChatConversation | null>(() => {
+    return conversations.value.find((conversation) => conversation.id === activeConversationId.value) || null;
+});
+
+const messages = ref<ChatMessage[]>([]);
+const input = ref('');
+const isLoading = ref(false);
+const sidebarCollapsed = ref(false);
+const settingsOpen = ref(false);
+const editingConversationTitle = ref<string | null>(null);
+const conversationTitleDraft = ref('');
+const settingsDraft = ref<ChatSettings>(settings.value);
+const conversationSystemDraft = ref('');
+
+const selectedModelName = computed(() => {
+    return selectedModel.value?.name || settings.value.model || '';
+});
+
+const activeSystemMessage = computed(() => {
+    const conversationMessage = activeConversation.value?.systemMessage?.trim();
+
+    if (conversationMessage) {
+        return conversationMessage;
+    }
+
+    return settings.value.defaultSystemMessage?.trim() || '';
+});
+
+const sortedConversations = computed(() => {
+    return [...conversations.value].sort((left, right) => {
+        if (left.pinned !== right.pinned) {
+            return left.pinned ? -1 : 1;
+        }
+
+        const leftTime = left.lastMessageAt || left.updatedAt || left.createdAt;
+        const rightTime = right.lastMessageAt || right.updatedAt || right.createdAt;
+
+        return new Date(rightTime).getTime() - new Date(leftTime).getTime();
+    });
+});
+
+const currentConversationTitle = computed(() => {
+    return activeConversation.value?.title || 'Nova conversa';
+});
+
+const setStatus = (message: string, type: 'error' | 'success' | 'info') => {
+    if (!message) {
+        return;
+    }
+
+    if (type === 'error') {
+        toast.error(message);
+        return;
+    }
+
+    if (type === 'success') {
+        toast.success(message);
+        return;
+    }
+
+    toast.info(message);
+};
+
+const refreshConversationList = async () => {
+    conversations.value = await chatStore.listConversations();
+};
+
+const refreshMessages = async () => {
+    if (!activeConversationId.value) {
+        messages.value = [];
+        return;
+    }
+
+    messages.value = await chatStore.listMessages(activeConversationId.value);
+};
+
+const createNewConversation = async () => {
+    const conversation = await chatStore.createConversation({
+        title: createConversationTitle(),
+        model: selectedModelName.value || settings.value.model || null,
+        systemMessage: '',
+    });
+
+    await chatStore.setActiveConversationId(conversation.id);
+    activeConversationId.value = conversation.id;
+
+    await refreshConversationList();
+    await refreshMessages();
+};
+
+const openConversation = async (conversationId: string) => {
+    activeConversationId.value = conversationId;
+    await chatStore.setActiveConversationId(conversationId);
+    await refreshMessages();
+};
+
+const ensureConversation = async (): Promise<ChatConversation> => {
+    if (activeConversation.value) {
+        return activeConversation.value;
+    }
+
+    const conversation = await chatStore.createConversation({
+        title: createConversationTitle(),
+        model: selectedModelName.value || settings.value.model || null,
+        systemMessage: '',
+    });
+
+    activeConversationId.value = conversation.id;
+    await chatStore.setActiveConversationId(conversation.id);
+    await refreshConversationList();
+
+    return conversation;
 };
 
 const loadModels = async () => {
     try {
         setStatus('Carregando modelos...', 'info');
         const loadedModels = await ollamaService.listModels(baseUrl.value);
-        if (loadedModels.length > 0) {
-            models.value = loadedModels;
-            if (!selectedModelName.value || !loadedModels.includes(selectedModelName.value)) {
-                selectedModel.value = loadedModels[0] || null;
+
+        models.value = loadedModels.map((item: string | ModelItem) => {
+            if (typeof item === 'string') {
+                return { name: item };
             }
-            setStatus(`${loadedModels.length} modelo(s) disponível(is)`, 'success');
-        } else {
-            setStatus('Nenhum modelo encontrado. Use: ollama pull mistral', 'error');
+
+            return item;
+        });
+
+        if (!selectedModel.value) {
+            selectedModel.value =
+                models.value.find((item) => item.name === settings.value.model) || models.value[0] || null;
+        } else if (selectedModel.value && !models.value.some((item) => item.name === selectedModel.value?.name)) {
+            selectedModel.value = models.value[0] || null;
         }
+
+        if (models.value.length === 0) {
+            setStatus('Nenhum modelo encontrado. Use: ollama pull mistral', 'error');
+            return;
+        }
+
+        setStatus(`${models.value.length} modelo(s) disponível(is)`, 'success');
     } catch (error) {
         setStatus(`Erro ao carregar modelos: ${error}`, 'error');
     }
 };
 
-const send = async () => {
-    if (!input.value.trim() || loading.value) return;
+const loadSettings = async () => {
+    settings.value = await chatStore.getSettings();
+    settingsDraft.value = { ...settings.value };
+    baseUrl.value = settings.value.host;
+    selectedModel.value = models.value.find((item) => item.name === settings.value.model) || selectedModel.value;
+    setBaseUrl(settings.value.host);
+};
 
-    const userMessage = input.value.trim();
-    input.value = '';
+const persistSettings = async () => {
+    if (!isUrl(baseUrl.value)) {
+        setStatus('Host inválido', 'error');
+        return;
+    }
 
-    messages.value.push({
-        id: ++messageCounter,
-        role: 'user',
-        text: userMessage,
-        model: `${selectedModelName.value}`,
-        timestamp: new Date(),
+    const nextSettings: ChatSettings = {
+        host: baseUrl.value,
+        model: selectedModelName.value || settings.value.model || 'mistral:latest',
+        defaultSystemMessage: settingsDraft.value.defaultSystemMessage,
+    };
+
+    settings.value = await chatStore.saveSettings(nextSettings);
+    settingsDraft.value = { ...settings.value };
+    setBaseUrl(settings.value.host);
+    setStatus('Configurações salvas', 'success');
+    settingsOpen.value = false;
+    await loadModels();
+};
+
+const startEditingTitle = (conversation: ChatConversation) => {
+    editingConversationTitle.value = conversation.id;
+    conversationTitleDraft.value = conversation.title;
+};
+
+const saveConversationTitle = async (conversationId: string) => {
+    const nextTitle = conversationTitleDraft.value.trim();
+
+    if (!nextTitle) {
+        return;
+    }
+
+    await chatStore.updateConversation(conversationId, {
+        title: nextTitle,
     });
 
-    loading.value = true;
-    setStatus('', 'info');
+    editingConversationTitle.value = null;
+    await refreshConversationList();
+};
 
+const togglePinned = async (conversation: ChatConversation) => {
+    await chatStore.updateConversation(conversation.id, {
+        pinned: !conversation.pinned,
+    });
+
+    await refreshConversationList();
+};
+
+const saveConversationSystemMessage = async () => {
+    if (!activeConversation.value) {
+        return;
+    }
+
+    await chatStore.updateConversation(activeConversation.value.id, {
+        systemMessage: conversationSystemDraft.value.trim(),
+    });
+
+    await refreshConversationList();
+    setStatus('Mensagem de sistema atualizada', 'success');
+};
+
+const removeConversation = async (conversationId: string) => {
+    await chatStore.deleteConversation(conversationId);
+
+    if (activeConversationId.value === conversationId) {
+        activeConversationId.value = null;
+        messages.value = [];
+    }
+
+    await refreshConversationList();
+
+    if (!activeConversationId.value && conversations.value.length > 0) {
+        await openConversation(conversations.value[0].id);
+        return;
+    }
+
+    if (!activeConversationId.value) {
+        await createNewConversation();
+    }
+};
+
+const sendMessage = async () => {
+    if (!input.value.trim() || isLoading.value) {
+        return;
+    }
+
+    const conversation = await ensureConversation();
+    const userPrompt = input.value.trim();
+    input.value = '';
+
+    const userMessage = await chatStore.createMessage({
+        conversationId: conversation.id,
+        role: 'user',
+        content: userPrompt,
+        model: selectedModelName.value || settings.value.model || null,
+    });
+
+    messages.value = [...messages.value, userMessage];
+    isLoading.value = true;
     try {
-        const response = await ollamaService.ask(userMessage, selectedModelName.value);
-        messages.value.push({
-            id: ++messageCounter,
+        const history = messages.value
+            .filter((message) => message.role !== 'system')
+            .map((message) => {
+                return `${message.role === 'user' ? 'Usuário' : 'Assistente'}: ${message.content}`;
+            })
+            .join('\n');
+
+        const promptParts = [
+            activeSystemMessage.value ? `Instruções do sistema:\n${activeSystemMessage.value}` : '',
+            history,
+            `Usuário: ${userPrompt}`,
+        ].filter(Boolean);
+
+        const response = await ollamaService.ask(
+            promptParts.join('\n\n'),
+            selectedModelName.value || settings.value.model || 'mistral:latest',
+            baseUrl.value
+        );
+
+        const assistantMessage = await chatStore.createMessage({
+            conversationId: conversation.id,
             role: 'assistant',
-            text: response?.response || '',
-            model: response?.model || '',
-            timestamp: new Date(),
+            content: response?.response || '',
+            model: response?.model || selectedModelName.value || settings.value.model || null,
         });
-        setStatus('✅ Resposta recebida', 'success');
+
+        messages.value = [...messages.value, assistantMessage];
+        await chatStore.touchConversation(conversation.id, assistantMessage.createdAt);
+        await refreshConversationList();
+        setStatus('Resposta recebida', 'success');
     } catch (error) {
-        setStatus(`❌ ${error}`, 'error');
-        messages.value.push({
-            id: ++messageCounter,
+        const errorMessage = await chatStore.createMessage({
+            conversationId: conversation.id,
             role: 'assistant',
-            text: `Erro: ${error}`,
-            timestamp: new Date(),
+            content: `Erro: ${error}`,
+            model: selectedModelName.value || settings.value.model || null,
         });
+
+        messages.value = [...messages.value, errorMessage];
+        setStatus(`Erro ao enviar mensagem: ${error}`, 'error');
     } finally {
-        loading.value = false;
+        isLoading.value = false;
         await nextTick();
         scrollToBottom();
     }
 };
 
 const scrollToBottom = () => {
-    const messagesDiv = document.querySelector('.overflow-y-auto');
-    if (messagesDiv) {
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
-    }
-};
+    const container = document.querySelector<HTMLElement>('[data-chat-scroll]');
 
-const setStatus = (msg: string, type: 'error' | 'success' | 'info') => {
-    status.value = msg;
-    statusType.value = type;
-};
-
-const loadPreviousMessages = async () => {
-    for (const item of demoMessages.value) {
-        messages.value.push({
-            id: ++messageCounter,
-            text: item?.text,
-            role: item?.role || 'assistant',
-            model: item?.model,
-            timestamp: item?.timestamp ? new Date(item?.timestamp) : new Date(),
-        });
+    if (!container) {
+        return;
     }
+
+    container.scrollTop = container.scrollHeight;
 };
 
 watch(
-    () => selectedModel.value,
-    (newValue, oldValue) => {
-        console.log('changed value', { newValue, oldValue });
-        setModel(newValue?.name);
-    }
-    // { deep: true }
-);
-
-const loadCurrentModel = async () => {
-    let _currentModel = getModel() || currentModel.value;
-
-    if (!models.value?.length) {
-        await loadModels();
-    }
-
-    console.log('models.value?.length', models.value?.length, models.value);
-
-    _currentModel = String(_currentModel || '')?.trim();
-
-    if (_currentModel) {
-        let _currentModelData = models.value?.find((item: any) => {
-            return item?.name === _currentModel;
-        })
-
-        if (_currentModelData) {
-            selectedModel.value = _currentModelData
+    () => selectedModel.value?.name,
+    async (value) => {
+        if (!value) {
+            return;
         }
 
-        console.log('_currentModelData', _currentModelData);
-        //
+        settings.value = {
+            ...settings.value,
+            model: value,
+        };
     }
+);
 
-    console.log('_currentModel', _currentModel);
-    currentModel.value = _currentModel || currentModel.value || getModel();
-    console.log('currentModel.value', currentModel.value);
+watch(
+    () => activeConversation.value?.id,
+    (value) => {
+        if (!value) {
+            return;
+        }
 
-    setModel(_currentModel || null);
-};
+        conversationSystemDraft.value = activeConversation.value?.systemMessage || '';
+    }
+);
 
 onMounted(async () => {
-    baseUrl.value = getBaseUrl();
-    await loadCurrentModel();
+    await loadSettings();
+    await loadModels();
+    await refreshConversationList();
 
-    if (!models.value?.length) {
-        loadModels();
+    const storedConversationId = await chatStore.getActiveConversationId();
+
+    if (storedConversationId) {
+        activeConversationId.value = storedConversationId;
+        await refreshMessages();
     }
 
-    loadPreviousMessages();
+    if (!activeConversationId.value) {
+        if (conversations.value.length > 0) {
+            activeConversationId.value = conversations.value[0].id;
+            await chatStore.setActiveConversationId(activeConversationId.value);
+            await refreshMessages();
+        } else {
+            await createNewConversation();
+        }
+    }
+
+    if (activeConversation.value) {
+        conversationSystemDraft.value = activeConversation.value.systemMessage || '';
+    }
+
+    await nextTick();
+    scrollToBottom();
 });
 </script>
 
-<style scoped>
-textarea {
-    font-family: inherit;
-}
-</style>
-
 <template>
-    <div class="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800">
-        <div class="container mx-auto max-w-7xl p-4">
-            <!-- Header -->
-            <div class="mb-8 pt-8">
-                <h1 class="text-4xl font-bold text-white mb-2">💬 Chat com Ollama</h1>
-                <div class="text-slate-400 flex flex-row gap-2 flex-wrap min-h-12 justify-between align-middle">
-                    <div class="w-full md:w-5/12 border border-gray-600 rounded-sm py-1 px-2">
-                        <span class="pe-2">Base URL:</span>
-                        <span class="select-all text-white">{{ baseUrl }}</span>
-                    </div>
-
-                    <div class="w-full md:w-6/12 border border-gray-600 rounded-sm py-1 px-2">
-                        <span class="pe-2">Selected model:</span>
-                        <span class="text-white">{{ selectedModel?.name }}</span>
-                    </div>
-
-                    <div class="w-full md:w-3/12 border border-gray-600 rounded-sm py-1 px-2">
-                        <span class="pe-2">Quantization level:</span>
-                        <span class="text-white">
-                            {{
-                                selectedModel?.details?.quantization_level
-                                    ? `(${selectedModel?.details?.quantization_level})`
-                                    : ''
-                            }}
-                        </span>
-                    </div>
-
-                    <div class="w-full md:w-3/12 border border-gray-600 rounded-sm py-1 px-2">
-                        <span class="pe-2">Parameter size:</span>
-                        <span class="text-white">
-                            {{
-                                selectedModel?.details?.parameter_size
-                                    ? `(${selectedModel?.details?.parameter_size})`
-                                    : ''
-                            }}
-                        </span>
-                    </div>
-
-                    <div class="w-full md:w-3/12 border border-gray-600 rounded-sm py-1 px-2">
-                        <span class="pe-2">Image size:</span>
-                        <span class="text-white">
-                            {{
-                                selectedModel?.size
-                                    ? `${formatBytes(selectedModel?.size) || '-'}`
-                                    : ''
-                            }}
-                        </span>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Status -->
-            <div
-                v-if="status"
+    <div class="h-screen overflow-hidden bg-[#0b0f17] text-slate-100">
+        <div class="flex h-screen overflow-hidden">
+            <aside
                 :class="[
-                    'mb-4 p-4 rounded-lg text-sm font-medium',
+                    'border-r border-white/10 bg-[#0f1623] transition-all duration-300',
                     {
-                        'bg-red-900/30 text-red-200 border border-red-700': statusType === 'error',
-                        'bg-green-900/30 text-green-200 border border-green-700': statusType === 'success',
-                        'bg-blue-900/30 text-blue-200 border border-blue-700': statusType === 'info',
+                        'w-20': sidebarCollapsed,
+                        'w-80': !sidebarCollapsed,
                     },
                 ]"
             >
-                {{ status }}
-            </div>
+                <div class="flex h-full flex-col">
+                    <div class="border-b border-white/10 p-4">
+                        <div class="flex items-center justify-between gap-3">
+                            <div v-if="!sidebarCollapsed">
+                                <p class="text-xs uppercase tracking-[0.24em] text-slate-400">Ollama local</p>
+                                <h1 class="text-lg font-semibold text-white">Chats</h1>
+                            </div>
+                            <button
+                                type="button"
+                                @click="sidebarCollapsed = !sidebarCollapsed"
+                                class="rounded-xl border border-white/10 bg-white/5 p-2 text-slate-200 transition hover:bg-white/10"
+                                :aria-label="sidebarCollapsed ? 'Expandir sidebar' : 'Recolher sidebar'"
+                            >
+                                <span v-if="sidebarCollapsed">›</span>
+                                <span v-else>‹</span>
+                            </button>
+                        </div>
 
-            <div class="flex gap-6 mb-3 justify-between">
-                <div class="w-8/12 flex gap-4 justify-between">
-                    <div class="w-full flex gap-2">
-                        <input
-                            type="url"
-                            v-model="baseUrl"
-                            placeholder="http://localhost:11434/api"
-                            @keydown.prevent.enter="handleSetBaseUrl"
-                            class="w-full px-3 py-2 bg-slate-700 text-white rounded text-sm border border-slate-600 focus:border-blue-500 focus:outline-none disabled:opacity-50"
-                        />
                         <button
                             type="button"
-                            :disabled="!isUrl(baseUrl)"
-                            @click.prevent.stop="handleSetBaseUrl"
-                            :class="[
-                                'w-2/12 px-3 py-2 text-slate-300 rounded text-sm border border-slate-600 hover:bg-slate-600 disabled:opacity-50 transition',
-                                {
-                                    'bg-slate-700/30 opacity-30 cursor-not-allowed': !isUrl(baseUrl),
-                                    'bg-slate-700': isUrl(baseUrl),
-                                },
-                            ]"
+                            @click="createNewConversation"
+                            class="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-blue-500"
                         >
-                            Ok
+                            <span>+</span>
+                            <span v-if="!sidebarCollapsed">Nova conversa</span>
                         </button>
                     </div>
-                </div>
 
-                <div class="w-full flex gap-2 justify-between">
-                    <select
-                        v-model="selectedModel"
-                        :disabled="loading"
-                        class="w-10/12 px-3 py-2 bg-slate-700 text-white rounded text-sm border border-slate-600 focus:border-blue-500 focus:outline-none disabled:opacity-50"
-                    >
-                        <option v-for="model in models" :key="model" :value="model">
-                            {{
-                                model?.details?.quantization_level
-                                    ? `${model?.name}:${model?.details?.quantization_level}`
-                                    : model?.name
-                            }}
-                            {{ model?.details?.parameter_size ? `(${model?.details?.parameter_size})` : '' }}
-                            {{ model?.details?.parameter_size ? `${formatBytes(model?.size) || '-'}` : '' }}
-                        </option>
-                    </select>
-
-                    <button
-                        @click="loadModels"
-                        :disabled="loading"
-                        class="px-3 py-2 bg-slate-700 text-slate-300 rounded text-sm border border-slate-600 hover:bg-slate-600 disabled:opacity-50 transition"
-                    >
-                        🔄 Recarregar
-                    </button>
-                </div>
-            </div>
-
-            <!-- Chat Area -->
-            <div
-                class="bg-slate-800 rounded-lg shadow-xl border border-slate-700 overflow-hidden flex flex-col h-[600px]"
-            >
-                <!-- Messages -->
-                <div class="flex-1 overflow-y-auto p-6 space-y-4">
-                    <div v-if="messages.length === 0" class="flex items-center justify-center h-full text-slate-400">
-                        <div class="text-center">
-                            <p class="text-lg mb-2">👋 Comece a conversar</p>
-                            <p class="text-sm">Digite uma mensagem e clique em "Enviar"</p>
-                        </div>
-                    </div>
-
-                    <div
-                        v-for="msg in messages"
-                        :key="msg.id"
-                        :class="['flex', msg.role === 'user' ? 'justify-end' : 'justify-start']"
-                    >
+                    <div class="flex-1 overflow-y-auto p-3">
                         <div
-                            :class="[
-                                'max-w-xs lg:max-w-md px-4 py-3 rounded-lg',
-                                {
-                                    'bg-blue-600 text-white rounded-br-none': msg.role === 'user',
-                                    'bg-slate-900 text-slate-100 rounded-bl-none': msg.role !== 'user',
-                                },
-                            ]"
+                            v-if="sortedConversations.length === 0"
+                            class="rounded-2xl border border-dashed border-white/10 p-4 text-sm text-slate-400"
                         >
-                            <div
-                                v-html="parseMd(msg.text || '')"
-                                data-markdown-type="container"
-                                class="prose max-w-none text-sm text-gray-100 whitespace-pre-wrap"
-                            ></div>
+                            Nenhuma conversa salva ainda.
+                        </div>
 
-                            <p
+                        <div class="space-y-2">
+                            <button
+                                v-for="conversation in sortedConversations"
+                                :key="conversation.id"
+                                type="button"
+                                @click="openConversation(conversation.id)"
                                 :class="[
-                                    'text-xs mt-1 opacity-70 flex gap-2 align-middle content-center justify-between pt-1',
-                                    // msg.role === 'user' ? 'justify-end' : 'justify-start',
+                                    'group w-full rounded-2xl border px-3 py-3 text-left transition',
                                     {
-                                        // 'justify-start': msg.role === 'user',
-                                        // 'justify-end': msg.role !== 'user',
-                                        'flex-row-reverse': msg.role !== 'user',
+                                        'border-blue-400/40 bg-blue-500/15': conversation.id === activeConversationId,
+                                        'border-white/10 bg-white/5 hover:bg-white/8':
+                                            conversation.id !== activeConversationId,
                                     },
                                 ]"
                             >
-                                <span class="text-xs opacity-70 italic">
-                                    {{ formatTime(msg.timestamp) }}
-                                </span>
-                                <span class="text-xs opacity-70 italic">
-                                    {{ msg?.model }}
-                                </span>
+                                <div class="flex items-start gap-3">
+                                    <div
+                                        class="mt-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-white/8 text-xs font-semibold text-slate-200"
+                                    >
+                                        {{ conversation.pinned ? 'P' : conversation.title.slice(0, 2).toUpperCase() }}
+                                    </div>
+
+                                    <div v-if="!sidebarCollapsed" class="min-w-0 flex-1">
+                                        <div class="flex items-center justify-between gap-2">
+                                            <div class="min-w-0">
+                                                <p class="truncate text-sm font-medium text-white">
+                                                    {{ conversation.title }}
+                                                </p>
+                                                <p class="text-xs text-slate-400">
+                                                    {{ conversation.pinned ? 'Fixada' : 'Recente' }} ·
+                                                    {{ toIsoTime(conversation.updatedAt) }}
+                                                </p>
+                                            </div>
+
+                                            <span
+                                                v-if="conversation.pinned"
+                                                class="rounded-full border border-amber-400/30 bg-amber-400/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] text-amber-200"
+                                            >
+                                                Topo
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div v-if="!sidebarCollapsed" class="border-t border-white/10 p-4 text-xs text-slate-400">
+                        Fixadas no topo, depois ordenadas pelas mais recentes.
+                    </div>
+                </div>
+            </aside>
+
+            <main class="relative flex min-w-0 flex-1 flex-col overflow-hidden">
+                <header class="sticky top-0 z-10 border-b border-white/10 bg-[#101827]/95 px-4 py-4 backdrop-blur">
+                    <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                        <div class="min-w-0">
+                            <p class="text-xs uppercase tracking-[0.24em] text-slate-400">Conversa ativa</p>
+                            <div class="mt-1 flex flex-wrap items-center gap-3">
+                                <h2 class="truncate text-2xl font-semibold text-white">
+                                    {{ currentConversationTitle }}
+                                </h2>
+                                <button
+                                    v-if="activeConversation"
+                                    type="button"
+                                    @click="startEditingTitle(activeConversation)"
+                                    class="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-200 transition hover:bg-white/10"
+                                >
+                                    Renomear
+                                </button>
+                                <button
+                                    v-if="activeConversation"
+                                    type="button"
+                                    @click="togglePinned(activeConversation)"
+                                    class="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-200 transition hover:bg-white/10"
+                                >
+                                    {{ activeConversation.pinned ? 'Desafixar' : 'Fixar' }}
+                                </button>
+                            </div>
+                            <p class="mt-2 text-sm text-slate-400">
+                                Modelo:
+                                <span class="text-slate-200">{{ selectedModelName || 'Sem modelo selecionado' }}</span>
+                                · Host:
+                                <span class="text-slate-200">{{ settings.host }}</span>
                             </p>
                         </div>
+
+                        <div class="flex flex-wrap gap-2">
+                            <button
+                                type="button"
+                                @click="settingsOpen = !settingsOpen"
+                                class="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-slate-200 transition hover:bg-white/10"
+                            >
+                                Configurações
+                            </button>
+                            <button
+                                type="button"
+                                @click="createNewConversation"
+                                class="rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500"
+                            >
+                                Nova conversa
+                            </button>
+                        </div>
+                    </div>
+                </header>
+
+                <section
+                    class="grid flex-1 min-h-0 grid-cols-1 gap-4 overflow-hidden p-4 xl:grid-cols-[minmax(0,1fr)_360px]"
+                >
+                    <div
+                        class="flex min-h-0 flex-col overflow-hidden rounded-3xl border border-white/10 bg-[#0f1726] shadow-2xl shadow-black/20"
+                    >
+                        <div class="border-b border-white/10 px-5 py-4">
+                            <div class="flex items-center justify-between">
+                                <div>
+                                    <p class="text-sm font-medium text-white">Histórico da conversa</p>
+                                    <p class="text-xs text-slate-400">{{ messages.length }} mensagem(ns)</p>
+                                </div>
+                                <p v-if="activeSystemMessage" class="text-xs text-slate-400">System message ativa</p>
+                            </div>
+                        </div>
+
+                        <div data-chat-scroll class="flex-1 overflow-y-auto px-4 py-5">
+                            <div
+                                v-if="messages.length === 0"
+                                class="flex min-h-[30rem] items-center justify-center rounded-3xl border border-dashed border-white/10 bg-white/3 px-6 text-center"
+                            >
+                                <div class="max-w-md">
+                                    <p class="text-xl font-semibold text-white">Comece uma conversa</p>
+                                    <p class="mt-2 text-sm text-slate-400">
+                                        O histórico vai ser salvo no IndexedDB e separado por conversa.
+                                    </p>
+                                </div>
+                            </div>
+
+                            <div class="space-y-4">
+                                <article
+                                    v-for="message in messages"
+                                    :key="message.id"
+                                    :class="[
+                                        'flex',
+                                        {
+                                            'justify-end': message.role === 'user',
+                                            'justify-start': message.role !== 'user',
+                                        },
+                                    ]"
+                                >
+                                    <div
+                                        :class="[
+                                            'max-w-[85%] rounded-3xl px-4 py-3 shadow-lg',
+                                            {
+                                                'rounded-br-md bg-blue-600 text-white': message.role === 'user',
+                                                'rounded-bl-md border border-white/10 bg-white/5 text-slate-100':
+                                                    message.role !== 'user',
+                                            },
+                                        ]"
+                                    >
+                                        <div
+                                            v-html="parseMd(message.content)"
+                                            data-markdown-type="container"
+                                            class="prose prose-invert max-w-none whitespace-pre-wrap text-sm"
+                                        ></div>
+
+                                        <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+                                            <span>{{ toIsoTime(message.createdAt) }}</span>
+                                            <span v-if="message.model">· {{ message.model }}</span>
+                                        </div>
+                                    </div>
+                                </article>
+
+                                <div v-if="isLoading" class="flex justify-start">
+                                    <div
+                                        class="rounded-3xl rounded-bl-md border border-white/10 bg-white/5 px-4 py-3 text-slate-100"
+                                    >
+                                        <div class="flex gap-2">
+                                            <span class="h-2 w-2 animate-bounce rounded-full bg-slate-400"></span>
+                                            <span
+                                                class="h-2 w-2 animate-bounce rounded-full bg-slate-400 [animation-delay:120ms]"
+                                            ></span>
+                                            <span
+                                                class="h-2 w-2 animate-bounce rounded-full bg-slate-400 [animation-delay:240ms]"
+                                            ></span>
+                                        </div>
+                                        <p class="mt-2 text-xs text-slate-400">Pensando...</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="sticky bottom-0 border-t border-white/10 bg-[#0c1320] px-4 py-4">
+                            <div class="flex flex-col gap-3 lg:flex-row">
+                                <textarea
+                                    v-model="input"
+                                    :disabled="isLoading"
+                                    @keydown.ctrl.enter.prevent="sendMessage"
+                                    rows="3"
+                                    placeholder="Digite uma mensagem para a conversa atual..."
+                                    class="min-h-24 flex-1 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white outline-none transition placeholder:text-slate-500 focus:border-blue-400/40"
+                                ></textarea>
+
+                                <div class="flex flex-row gap-3 lg:flex-col">
+                                    <button
+                                        type="button"
+                                        @click="sendMessage"
+                                        :disabled="isLoading || !input.trim()"
+                                        class="rounded-2xl bg-blue-600 px-5 py-3 text-sm font-medium text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-white/10"
+                                    >
+                                        Enviar
+                                    </button>
+                                    <button
+                                        type="button"
+                                        @click="
+                                            conversationSystemDraft =
+                                                activeConversation?.systemMessage || settings.defaultSystemMessage || ''
+                                        "
+                                        class="rounded-2xl border border-white/10 bg-white/5 px-5 py-3 text-sm text-slate-200 transition hover:bg-white/10"
+                                    >
+                                        Reset system
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
                     </div>
 
-                    <!-- Loading indicator -->
-                    <div v-if="loading" class="flex justify-start">
-                        <div class="bg-slate-700 text-slate-100 px-4 py-3 rounded-lg rounded-bl-none">
-                            <div class="flex space-x-2">
-                                <div class="w-2 h-2 bg-slate-400 rounded-full animate-bounce"></div>
-                                <div
-                                    class="w-2 h-2 bg-slate-400 rounded-full animate-bounce"
-                                    style="animation-delay: 0.1s"
-                                ></div>
-                                <div
-                                    class="w-2 h-2 bg-slate-400 rounded-full animate-bounce"
-                                    style="animation-delay: 0.2s"
-                                ></div>
+                    <div class="flex min-h-0 flex-col gap-4">
+                        <div class="rounded-3xl border border-white/10 bg-[#0f1726] p-5">
+                            <div class="flex items-center justify-between gap-3">
+                                <div>
+                                    <p class="text-sm font-medium text-white">Mensagem de sistema da conversa</p>
+                                    <p class="mt-1 text-xs text-slate-400">Se vazia, usa o padrão das configurações.</p>
+                                </div>
+                                <button
+                                    type="button"
+                                    @click="saveConversationSystemMessage"
+                                    class="rounded-xl bg-emerald-600 px-3 py-2 text-xs font-medium text-white transition hover:bg-emerald-500"
+                                >
+                                    Salvar
+                                </button>
                             </div>
-                            <p class="text-xs mt-2 text-slate-400">Pensando...</p>
+
+                            <textarea
+                                v-model="conversationSystemDraft"
+                                rows="7"
+                                class="mt-4 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white outline-none placeholder:text-slate-500"
+                                placeholder="Defina instruções específicas para esta conversa..."
+                            ></textarea>
+                        </div>
+
+                        <div class="rounded-3xl border border-white/10 bg-[#0f1726] p-5">
+                            <p class="text-sm font-medium text-white">Ações da conversa</p>
+                            <div class="mt-4 grid grid-cols-2 gap-3">
+                                <button
+                                    type="button"
+                                    @click="activeConversation && togglePinned(activeConversation)"
+                                    :disabled="!activeConversation"
+                                    class="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-200 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    {{ activeConversation?.pinned ? 'Desafixar' : 'Fixar' }}
+                                </button>
+                                <button
+                                    type="button"
+                                    @click="removeConversation(activeConversation?.id || '')"
+                                    :disabled="!activeConversation"
+                                    class="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200 transition hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    Excluir
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="rounded-3xl border border-white/10 bg-[#0f1726] p-5 text-sm text-slate-300">
+                            <p class="font-medium text-white">Status</p>
+                            <div class="mt-4 space-y-2 text-xs text-slate-400">
+                                <p>Host atual: {{ settings.host }}</p>
+                                <p>Modelo padrão: {{ settings.model }}</p>
+                                <p>System default: {{ settings.defaultSystemMessage || 'vazio' }}</p>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <div v-if="settingsOpen" class="absolute inset-0 z-20 bg-black/50 p-4 backdrop-blur-sm">
+                    <div
+                        class="mx-auto mt-8 w-full max-w-2xl rounded-3xl border border-white/10 bg-[#0f1726] p-6 shadow-2xl"
+                    >
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <p class="text-xs uppercase tracking-[0.24em] text-slate-400">Configurações</p>
+                                <h3 class="text-xl font-semibold text-white">Modelo, host e system default</h3>
+                            </div>
+                            <button
+                                type="button"
+                                @click="settingsOpen = false"
+                                class="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-200"
+                            >
+                                Fechar
+                            </button>
+                        </div>
+
+                        <div class="mt-6 grid gap-4">
+                            <label class="grid gap-2">
+                                <span class="text-sm text-slate-300">Host</span>
+                                <input
+                                    v-model="baseUrl"
+                                    type="url"
+                                    class="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white outline-none"
+                                    placeholder="http://localhost:11434/api"
+                                />
+                            </label>
+
+                            <label class="grid gap-2">
+                                <span class="text-sm text-slate-300">Modelo padrão</span>
+                                <select
+                                    v-model="selectedModel"
+                                    class="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white outline-none"
+                                >
+                                    <option v-for="model in models" :key="model.name" :value="model">
+                                        {{ model.name }}
+                                    </option>
+                                </select>
+                            </label>
+
+                            <label class="grid gap-2">
+                                <span class="text-sm text-slate-300">Mensagem de sistema padrão</span>
+                                <textarea
+                                    v-model="settingsDraft.defaultSystemMessage"
+                                    rows="6"
+                                    class="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white outline-none"
+                                    placeholder="Ex.: Você é um assistente direto, objetivo e técnico."
+                                ></textarea>
+                            </label>
+                        </div>
+
+                        <div class="mt-6 flex justify-end gap-3">
+                            <button
+                                type="button"
+                                @click="settingsOpen = false"
+                                class="rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-slate-200"
+                            >
+                                Cancelar
+                            </button>
+                            <button
+                                type="button"
+                                @click="persistSettings"
+                                class="rounded-2xl bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500"
+                            >
+                                Salvar
+                            </button>
                         </div>
                     </div>
                 </div>
 
-                <!-- Input Area -->
-                <div class="border-t border-slate-700 p-4 bg-slate-900">
-                    <div class="flex gap-2">
-                        <textarea
-                            v-model="input"
-                            @keydown.enter.ctrl="send"
-                            :disabled="loading"
-                            placeholder="Digite sua mensagem... (Ctrl+Enter para enviar)"
-                            class="flex-1 px-4 py-2 bg-slate-700 text-white rounded border border-slate-600 focus:border-blue-500 focus:outline-none resize-none disabled:opacity-50"
-                            rows="3"
-                        ></textarea>
-                        <button
-                            @click="send"
-                            :disabled="loading || !input.trim()"
-                            :class="[
-                                'px-4 py-2 bg-blue-600 text-white rounded font-medium hover:bg-blue-700 disabled:bg-slate-600 disabled:cursor-not-allowed transition whitespace-nowrap',
-                                {
-                                    'bg-slate-700/30 opacity-30 cursor-not-allowed':
-                                        !isUrl(baseUrl) || loading || !input.trim(),
-                                    'bg-slate-700': isUrl(baseUrl) && !loading && input.trim(),
-                                },
-                            ]"
-                        >
-                            <span>{{ loading ? '⏳' : '📤' }}</span>
-                            <span>Enviar</span>
-                            <span class="italic text-gray-400 font-light">Ctrl+Enter</span>
-                        </button>
+                <div v-if="editingConversationTitle" class="absolute inset-0 z-30 bg-black/50 p-4 backdrop-blur-sm">
+                    <div
+                        class="mx-auto mt-24 w-full max-w-lg rounded-3xl border border-white/10 bg-[#0f1726] p-6 shadow-2xl"
+                    >
+                        <h3 class="text-xl font-semibold text-white">Renomear conversa</h3>
+                        <input
+                            v-model="conversationTitleDraft"
+                            @keydown.enter.prevent.stop="saveConversationTitle(editingConversationTitle)"
+                            type="text"
+                            class="mt-4 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white outline-none"
+                        />
+
+                        <div class="mt-6 flex justify-end gap-3">
+                            <button
+                                type="button"
+                                @click="editingConversationTitle = null"
+                                class="rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-slate-200"
+                            >
+                                Cancelar
+                            </button>
+                            <button
+                                type="button"
+                                @click="saveConversationTitle(editingConversationTitle)"
+                                class="rounded-2xl bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500"
+                            >
+                                Salvar
+                            </button>
+                        </div>
                     </div>
                 </div>
-            </div>
-
-            <!-- Info -->
-            <div class="mt-6 text-xs text-slate-400 bg-slate-900/50 p-4 rounded border border-slate-700">
-                <p>
-                    💡
-                    <strong>Dica:</strong>
-                    Ollama deve estar rodando com
-                    <code class="bg-slate-800 px-1 py-0.5 rounded">ollama serve</code>
-                </p>
-                <p>
-                    ⏱️
-                    <strong>Primeira resposta:</strong>
-                    Pode levar alguns segundos (carregando modelo na VRAM)
-                </p>
-            </div>
+            </main>
         </div>
     </div>
 </template>
