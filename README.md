@@ -6,7 +6,6 @@ Um projeto Vue 3 + TypeScript que integra com Ollama para chat local com IA.
 
 ### 1. Instale as dependências
 ```bash
-cd /tmp/test-ollama
 npm install
 ```
 

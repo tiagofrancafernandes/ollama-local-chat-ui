@@ -89,14 +89,54 @@ const messages = ref<ChatMessage[]>([]);
 const input = ref('');
 const isLoading = ref(false);
 const sidebarCollapsed = ref(false);
+const rightSidebarCollapsed = ref(false);
 const settingsOpen = ref(false);
 const editingConversationTitle = ref<string | null>(null);
 const conversationTitleDraft = ref('');
 const settingsDraft = ref<ChatSettings>(settings.value);
 const conversationSystemDraft = ref('');
+const conversationModelDraft = ref('');
 
 const selectedModelName = computed(() => {
     return selectedModel.value?.name || settings.value.model || '';
+});
+
+const activeConversationModelName = computed(() => {
+    return activeConversation.value?.model || settings.value.model || '';
+});
+
+const getConversationModelLabel = (conversation: ChatConversation): string => {
+    if (conversation.model) {
+        return conversation.model;
+    }
+
+    return 'default';
+};
+
+const getConversationModelTone = (conversation: ChatConversation): string => {
+    if (conversation.id === routeConversationId.value) {
+        return 'border-blue-400/40 bg-blue-500/15 text-blue-100';
+    }
+
+    if (conversation.model) {
+        return 'border-emerald-400/30 bg-emerald-500/10 text-emerald-100';
+    }
+
+    return 'border-white/10 bg-white/5 text-slate-300';
+};
+
+const preferredModelName = computed(() => {
+    const configuredModel = String(settings.value.model || '').trim();
+
+    if (configuredModel && models.value.some((item) => item.name === configuredModel)) {
+        return configuredModel;
+    }
+
+    return models.value[0]?.name || configuredModel || '';
+});
+
+const routeRequestedModelName = computed(() => {
+    return String(route.query.model || '').trim();
 });
 
 const activeSystemMessage = computed(() => {
@@ -165,7 +205,7 @@ const createNewConversation = async () => {
     const conversation = await chatStore.createConversation({
         id: chatStore.createId(),
         title: createConversationTitle(),
-        model: selectedModelName.value || settings.value.model || null,
+        model: preferredModelName.value || null,
         systemMessage: '',
     });
 
@@ -202,7 +242,7 @@ const ensureConversation = async (): Promise<ChatConversation> => {
     const conversation = await chatStore.createConversation({
         id: chatStore.createId(),
         title: createConversationTitle(),
-        model: selectedModelName.value || settings.value.model || null,
+        model: preferredModelName.value || null,
         systemMessage: '',
     });
 
@@ -242,6 +282,17 @@ const loadModels = async () => {
         if (models.value.length === 0) {
             setStatus('Nenhum modelo encontrado. Use: ollama pull mistral', 'error');
             return;
+        }
+
+        const routeModelName = routeRequestedModelName.value;
+        const matchedRouteModel = models.value.find((item) => item.name === routeModelName) || null;
+        const preferredModel =
+            models.value.find((item) => item.name === settings.value.model) || models.value[0] || null;
+
+        if (matchedRouteModel) {
+            selectedModel.value = matchedRouteModel;
+        } else if (!selectedModel.value || !models.value.some((item) => item.name === selectedModel.value?.name)) {
+            selectedModel.value = preferredModel;
         }
 
         setStatus(`${models.value.length} modelo(s) disponível(is)`, 'success');
@@ -319,6 +370,30 @@ const saveConversationSystemMessage = async () => {
     setStatus('Mensagem de sistema atualizada', 'success');
 };
 
+const saveConversationModel = async () => {
+    if (!activeConversation.value) {
+        return;
+    }
+
+    const nextModelName = conversationModelDraft.value.trim();
+
+    if (!nextModelName) {
+        await chatStore.updateConversation(activeConversation.value.id, {
+            model: null,
+        });
+        await refreshConversationList();
+        setStatus('A conversa voltou a usar o modelo padrão', 'success');
+        return;
+    }
+
+    await chatStore.updateConversation(activeConversation.value.id, {
+        model: nextModelName,
+    });
+
+    await refreshConversationList();
+    setStatus('Modelo da conversa atualizado', 'success');
+};
+
 const removeConversation = async (conversationId: string) => {
     await chatStore.deleteConversation(conversationId);
 
@@ -344,6 +419,8 @@ const sendMessage = async () => {
     }
 
     const conversation = await ensureConversation();
+    const effectiveModelName =
+        conversation.model || settings.value.model || selectedModelName.value || 'mistral:latest';
     const userPrompt = input.value.trim();
     input.value = '';
 
@@ -351,7 +428,7 @@ const sendMessage = async () => {
         conversationId: conversation.id,
         role: 'user',
         content: userPrompt,
-        model: selectedModelName.value || settings.value.model || null,
+        model: effectiveModelName,
     });
 
     messages.value = [...messages.value, userMessage];
@@ -370,17 +447,13 @@ const sendMessage = async () => {
             `Usuário: ${userPrompt}`,
         ].filter(Boolean);
 
-        const response = await ollamaService.ask(
-            promptParts.join('\n\n'),
-            selectedModelName.value || settings.value.model || 'mistral:latest',
-            baseUrl.value
-        );
+        const response = await ollamaService.ask(promptParts.join('\n\n'), effectiveModelName, baseUrl.value);
 
         const assistantMessage = await chatStore.createMessage({
             conversationId: conversation.id,
             role: 'assistant',
             content: response?.response || '',
-            model: response?.model || selectedModelName.value || settings.value.model || null,
+            model: response?.model || effectiveModelName,
         });
 
         messages.value = [...messages.value, assistantMessage];
@@ -392,7 +465,7 @@ const sendMessage = async () => {
             conversationId: conversation.id,
             role: 'assistant',
             content: `Erro: ${error}`,
-            model: selectedModelName.value || settings.value.model || null,
+            model: effectiveModelName,
         });
 
         messages.value = [...messages.value, errorMessage];
@@ -436,6 +509,7 @@ watch(
         }
 
         conversationSystemDraft.value = activeConversation.value?.systemMessage || '';
+        conversationModelDraft.value = activeConversation.value?.model || '';
     }
 );
 
@@ -444,21 +518,24 @@ onMounted(async () => {
     await loadModels();
     await refreshConversationList();
 
-    const routeModel = String(route.query.model || '').trim();
     const routePrompt = String(route.query.prompt || route.query.q || '').trim();
     const storedConversationId = await chatStore.getActiveConversationId();
-
-    if (routeModel) {
-        settings.value = {
-            ...settings.value,
-            model: routeModel,
-        };
-    }
 
     if (routeConversationId.value) {
         const conversation = await chatStore.getConversation(routeConversationId.value);
 
         if (conversation) {
+            if (
+                routeRequestedModelName.value &&
+                models.value.some((item) => item.name === routeRequestedModelName.value)
+            ) {
+                selectedModel.value =
+                    models.value.find((item) => item.name === routeRequestedModelName.value) || selectedModel.value;
+            } else if (!selectedModel.value || !models.value.some((item) => item.name === selectedModel.value?.name)) {
+                selectedModel.value =
+                    models.value.find((item) => item.name === preferredModelName.value) || models.value[0] || null;
+            }
+
             await chatStore.setActiveConversationId(conversation.id);
             await refreshMessages();
         }
@@ -476,6 +553,7 @@ onMounted(async () => {
 
     if (activeConversation.value) {
         conversationSystemDraft.value = activeConversation.value.systemMessage || '';
+        conversationModelDraft.value = activeConversation.value.model || '';
     }
 
     if (routePrompt) {
@@ -535,7 +613,7 @@ onMounted(async () => {
                         </button>
                     </div>
 
-                    <div class="flex-1 overflow-y-auto p-3">
+                    <div class="flex-1 scrollbar-none overflow-y-auto p-3">
                         <div
                             v-if="sortedConversations.length === 0"
                             class="rounded-2xl border border-dashed border-white/10 p-4 text-sm text-slate-400"
@@ -577,12 +655,22 @@ onMounted(async () => {
                                                 </p>
                                             </div>
 
-                                            <span
-                                                v-if="conversation.pinned"
-                                                class="rounded-full border border-amber-400/30 bg-amber-400/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] text-amber-200"
-                                            >
-                                                Topo
-                                            </span>
+                                            <div class="flex flex-col items-end gap-1">
+                                                <span
+                                                    v-if="conversation.pinned"
+                                                    class="rounded-full border border-amber-400/30 bg-amber-400/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] text-amber-200"
+                                                >
+                                                    Topo
+                                                </span>
+                                                <span
+                                                    :class="[
+                                                        'rounded-full px-2 py-0.5 text-[10px] border',
+                                                        getConversationModelTone(conversation),
+                                                    ]"
+                                                >
+                                                    {{ getConversationModelLabel(conversation) }}
+                                                </span>
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
@@ -650,10 +738,16 @@ onMounted(async () => {
                 </header>
 
                 <section
-                    class="grid flex-1 min-h-0 grid-cols-1 gap-4 overflow-hidden p-4 xl:grid-cols-[minmax(0,1fr)_360px]"
+                    :class="[
+                        'grid flex-1 min-h-0 grid-cols-1 gap-4 p-4 transition-all',
+                        {
+                            'xl:grid-cols-[minmax(0,1fr)_360px]': !rightSidebarCollapsed,
+                            'xl:grid-cols-[minmax(0,1fr)_80px]': rightSidebarCollapsed,
+                        },
+                    ]"
                 >
                     <div
-                        class="flex min-h-0 flex-col overflow-hidden rounded-3xl border border-white/10 bg-[#0f1726] shadow-2xl shadow-black/20"
+                        class="flex min-h-[80vh] flex-col overflow-auto rounded-xl border border-white/10 bg-[#0f1726] shadow-2xl shadow-black/20"
                     >
                         <div class="border-b border-white/10 px-5 py-4">
                             <div class="flex items-center justify-between">
@@ -665,10 +759,10 @@ onMounted(async () => {
                             </div>
                         </div>
 
-                        <div data-chat-scroll class="flex-1 overflow-y-auto px-4 py-5">
+                        <div data-chat-scroll class="flex-1 scrollbar-none overflow-y-auto px-4 py-5">
                             <div
                                 v-if="messages.length === 0"
-                                class="flex min-h-[30rem] items-center justify-center rounded-3xl border border-dashed border-white/10 bg-white/3 px-6 text-center"
+                                class="flex min-h-[30rem] items-center justify-center rounded-xl border border-dashed border-white/10 bg-white/3 px-6 text-center"
                             >
                                 <div class="max-w-md">
                                     <p class="text-xl font-semibold text-white">Comece uma conversa</p>
@@ -692,7 +786,7 @@ onMounted(async () => {
                                 >
                                     <div
                                         :class="[
-                                            'max-w-[85%] rounded-3xl px-4 py-3 shadow-lg',
+                                            'max-w-[85%] rounded-xl px-4 py-3 shadow-lg',
                                             {
                                                 'rounded-br-md bg-blue-600 text-white': message.role === 'user',
                                                 'rounded-bl-md border border-white/10 bg-white/5 text-slate-100':
@@ -715,7 +809,7 @@ onMounted(async () => {
 
                                 <div v-if="isLoading" class="flex justify-start">
                                     <div
-                                        class="rounded-3xl rounded-bl-md border border-white/10 bg-white/5 px-4 py-3 text-slate-100"
+                                        class="rounded-xl rounded-bl-md border border-white/10 bg-white/5 px-4 py-3 text-slate-100"
                                     >
                                         <div class="flex gap-2">
                                             <span class="h-2 w-2 animate-bounce rounded-full bg-slate-400"></span>
@@ -767,66 +861,146 @@ onMounted(async () => {
                         </div>
                     </div>
 
-                    <div class="flex min-h-0 flex-col gap-4">
-                        <div class="rounded-3xl border border-white/10 bg-[#0f1726] p-5">
-                            <div class="flex items-center justify-between gap-3">
-                                <div>
-                                    <p class="text-sm font-medium text-white">Mensagem de sistema da conversa</p>
-                                    <p class="mt-1 text-xs text-slate-400">Se vazia, usa o padrão das configurações.</p>
+                    <div
+                        :class="[
+                            'flex min-h-0 h-full flex-col gap-4 rounded-xl border border-white/10 bg-[#0f1726] p-4 transition-all',
+                        ]"
+                    >
+                        <div
+                            :class="[
+                                'flex max-h-[80vh] items-center justify-between gap-3 scrollbar-none overflow-y-hidden',
+                            ]"
+                        >
+                            <div v-if="!rightSidebarCollapsed">
+                                <p class="text-xs uppercase tracking-[0.24em] text-slate-400">Conversa</p>
+                                <h3 class="text-lg font-semibold text-white">Ajustes locais</h3>
+                            </div>
+
+                            <button
+                                type="button"
+                                @click="rightSidebarCollapsed = !rightSidebarCollapsed"
+                                class="rounded-xl border border-white/10 bg-white/5 p-2 text-slate-200 transition hover:bg-white/10"
+                                :aria-label="
+                                    rightSidebarCollapsed
+                                        ? 'Expandir sidebar da conversa'
+                                        : 'Recolher sidebar da conversa'
+                                "
+                            >
+                                <span v-if="rightSidebarCollapsed">‹</span>
+                                <span v-else>›</span>
+                            </button>
+                        </div>
+
+                        <div class="w-full h-[80vh] scrollbar-none overflow-y-auto flex flex-col gap-y-4">
+                            <template v-if="!rightSidebarCollapsed">
+                                <div class="rounded-xl border border-white/10 bg-white/5 p-2 h-fit">
+                                    <div class="flex items-center justify-between gap-3">
+                                        <div>
+                                            <p class="text-sm font-medium text-white">Modelo da conversa</p>
+                                            <p class="mt-1 text-xs text-slate-400">
+                                                Vazio usa o modelo padrão. Esse valor sobrescreve apenas esta conversa.
+                                            </p>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            @click="saveConversationModel"
+                                            class="rounded-xl bg-blue-600 px-3 py-2 text-xs font-medium text-white transition hover:bg-blue-500"
+                                        >
+                                            Salvar
+                                        </button>
+                                    </div>
+
+                                    <select
+                                        v-model="conversationModelDraft"
+                                        class="mt-4 w-full rounded-2xl border border-white/10 bg-[#101827] px-4 py-3 text-sm text-white outline-none"
+                                    >
+                                        <option value="">Usar padrão</option>
+                                        <option v-for="model in models" :key="model.name" :value="model.name">
+                                            {{ model.name }}
+                                        </option>
+                                    </select>
+
+                                    <p class="mt-3 text-xs text-slate-400">
+                                        Atual: {{ activeConversationModelName || 'Padrão' }}
+                                    </p>
                                 </div>
-                                <button
-                                    type="button"
-                                    @click="saveConversationSystemMessage"
-                                    class="rounded-xl bg-emerald-600 px-3 py-2 text-xs font-medium text-white transition hover:bg-emerald-500"
-                                >
-                                    Salvar
-                                </button>
-                            </div>
 
-                            <textarea
-                                v-model="conversationSystemDraft"
-                                rows="7"
-                                class="mt-4 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white outline-none placeholder:text-slate-500"
-                                placeholder="Defina instruções específicas para esta conversa..."
-                            ></textarea>
-                        </div>
+                                <div class="rounded-xl border border-white/10 bg-white/5 p-2">
+                                    <div class="flex items-center justify-between gap-3">
+                                        <div>
+                                            <p class="text-sm font-medium text-white">
+                                                Mensagem de sistema da conversa
+                                            </p>
+                                            <p class="mt-1 text-xs text-slate-400">
+                                                Se vazia, usa o padrão das configurações.
+                                            </p>
+                                        </div>
+                                    </div>
 
-                        <div class="rounded-3xl border border-white/10 bg-[#0f1726] p-5">
-                            <p class="text-sm font-medium text-white">Ações da conversa</p>
-                            <div class="mt-4 grid grid-cols-2 gap-3">
-                                <button
-                                    type="button"
-                                    @click="activeConversation && togglePinned(activeConversation)"
-                                    :disabled="!activeConversation"
-                                    class="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-200 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
-                                >
-                                    {{ activeConversation?.pinned ? 'Desafixar' : 'Fixar' }}
-                                </button>
-                                <button
-                                    type="button"
-                                    @click="removeConversation(activeConversation?.id || '')"
-                                    :disabled="!activeConversation"
-                                    class="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200 transition hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-                                >
-                                    Excluir
-                                </button>
-                            </div>
-                        </div>
+                                    <textarea
+                                        v-model="conversationSystemDraft"
+                                        rows="7"
+                                        class="mt-4 w-full rounded-2xl border border-white/10 bg-[#101827] px-4 py-3 text-sm text-white outline-none placeholder:text-slate-500"
+                                        placeholder="Defina instruções específicas para esta conversa..."
+                                    ></textarea>
+                                    <div class="w-full flex justify-end pt-2">
+                                        <button
+                                            type="button"
+                                            @click="saveConversationSystemMessage"
+                                            :class="[
+                                                'rounded-lg bg-emerald-600 px-3 py-2 text-xs font-medium text-white transition hover:bg-emerald-500',
+                                                {
+                                                    invisible: !conversationSystemDraft,
+                                                    visible: conversationSystemDraft,
+                                                },
+                                            ]"
+                                        >
+                                            Salvar {{ conversationSystemDraft }}
+                                        </button>
+                                    </div>
+                                </div>
 
-                        <div class="rounded-3xl border border-white/10 bg-[#0f1726] p-5 text-sm text-slate-300">
-                            <p class="font-medium text-white">Status</p>
-                            <div class="mt-4 space-y-2 text-xs text-slate-400">
-                                <p>Host atual: {{ settings.host }}</p>
-                                <p>Modelo padrão: {{ settings.model }}</p>
-                                <p>System default: {{ settings.defaultSystemMessage || 'vazio' }}</p>
-                            </div>
+                                <div class="rounded-xl border border-white/10 bg-white/5 p-2">
+                                    <p class="text-sm font-medium text-white">Ações da conversa</p>
+                                    <div class="mt-4 grid grid-cols-2 gap-3">
+                                        <button
+                                            type="button"
+                                            @click="activeConversation && togglePinned(activeConversation)"
+                                            :disabled="!activeConversation"
+                                            class="rounded-2xl border border-white/10 bg-white/5 px-4 py-1 text-sm text-slate-200 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
+                                        >
+                                            {{ activeConversation?.pinned ? 'Desafixar' : 'Fixar' }}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            @click="removeConversation(activeConversation?.id || '')"
+                                            :disabled="!activeConversation"
+                                            class="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-1 text-sm text-red-200 transition hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                                        >
+                                            Excluir
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div class="rounded-xl border border-white/10 bg-white/5 p-2 text-sm text-slate-300">
+                                    <p class="font-medium text-white">Resumo</p>
+                                    <div class="mt-4 space-y-2 text-xs text-slate-400">
+                                        <p>Modelo padrão: {{ settings.model }}</p>
+                                        <p>Modelo da conversa: {{ activeConversationModelName || 'Padrão' }}</p>
+                                        <p>System default: {{ settings.defaultSystemMessage || 'vazio' }}</p>
+                                    </div>
+                                </div>
+                            </template>
                         </div>
                     </div>
                 </section>
 
-                <div v-if="route.name === 'settings' || settingsOpen" class="absolute inset-0 z-20 bg-black/50 p-4 backdrop-blur-sm">
+                <div
+                    v-if="route.name === 'settings' || settingsOpen"
+                    class="absolute inset-0 z-20 bg-black/50 p-4 backdrop-blur-sm"
+                >
                     <div
-                        class="mx-auto mt-8 w-full max-w-2xl rounded-3xl border border-white/10 bg-[#0f1726] p-6 shadow-2xl"
+                        class="mx-auto mt-8 w-full max-w-2xl rounded-xl border border-white/10 bg-[#0f1726] p-6 shadow-2xl"
                     >
                         <div class="flex items-center justify-between">
                             <div>
@@ -839,7 +1013,7 @@ onMounted(async () => {
                                     router.push(
                                         routeConversationId
                                             ? { name: 'conversation', params: { conversationId: routeConversationId } }
-                                            : { name: 'home' },
+                                            : { name: 'home' }
                                     )
                                 "
                                 class="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-200"
@@ -889,7 +1063,7 @@ onMounted(async () => {
                                     router.push(
                                         routeConversationId
                                             ? { name: 'conversation', params: { conversationId: routeConversationId } }
-                                            : { name: 'home' },
+                                            : { name: 'home' }
                                     )
                                 "
                                 class="rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-slate-200"
@@ -909,7 +1083,7 @@ onMounted(async () => {
 
                 <div v-if="editingConversationTitle" class="absolute inset-0 z-30 bg-black/50 p-4 backdrop-blur-sm">
                     <div
-                        class="mx-auto mt-24 w-full max-w-lg rounded-3xl border border-white/10 bg-[#0f1726] p-6 shadow-2xl"
+                        class="mx-auto mt-24 w-full max-w-lg rounded-xl border border-white/10 bg-[#0f1726] p-6 shadow-2xl"
                     >
                         <h3 class="text-xl font-semibold text-white">Renomear conversa</h3>
                         <input
