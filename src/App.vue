@@ -3,6 +3,7 @@ import DOMPurify from 'dompurify';
 import MarkdownIt from 'markdown-it';
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { toast } from 'vue3-toastify';
+import { useRoute, useRouter } from 'vue-router';
 
 import { ollamaService, setBaseUrl } from '@/services/ollama';
 import {
@@ -69,6 +70,8 @@ const toIsoTime = (value: string | Date | null): string => {
 };
 
 const baseUrl = ref('http://localhost:11434/api');
+const route = useRoute();
+const router = useRouter();
 const selectedModel = ref<ModelItem | null>(null);
 const models = ref<ModelItem[]>([]);
 const settings = ref<ChatSettings>({
@@ -78,9 +81,8 @@ const settings = ref<ChatSettings>({
 });
 
 const conversations = ref<ChatConversation[]>([]);
-const activeConversationId = ref<string | null>(null);
 const activeConversation = computed<ChatConversation | null>(() => {
-    return conversations.value.find((conversation) => conversation.id === activeConversationId.value) || null;
+    return conversations.value.find((conversation) => conversation.id === routeConversationId.value) || null;
 });
 
 const messages = ref<ChatMessage[]>([]);
@@ -124,6 +126,10 @@ const currentConversationTitle = computed(() => {
     return activeConversation.value?.title || 'Nova conversa';
 });
 
+const routeConversationId = computed(() => {
+    return String(route.params.conversationId || '').trim();
+});
+
 const setStatus = (message: string, type: 'error' | 'success' | 'info') => {
     if (!message) {
         return;
@@ -147,30 +153,43 @@ const refreshConversationList = async () => {
 };
 
 const refreshMessages = async () => {
-    if (!activeConversationId.value) {
+    if (!routeConversationId.value) {
         messages.value = [];
         return;
     }
 
-    messages.value = await chatStore.listMessages(activeConversationId.value);
+    messages.value = await chatStore.listMessages(routeConversationId.value);
 };
 
 const createNewConversation = async () => {
     const conversation = await chatStore.createConversation({
+        id: chatStore.createId(),
         title: createConversationTitle(),
         model: selectedModelName.value || settings.value.model || null,
         systemMessage: '',
     });
 
+    await router.push({
+        name: 'conversation',
+        params: {
+            conversationId: conversation.id,
+        },
+    });
+
     await chatStore.setActiveConversationId(conversation.id);
-    activeConversationId.value = conversation.id;
 
     await refreshConversationList();
     await refreshMessages();
 };
 
 const openConversation = async (conversationId: string) => {
-    activeConversationId.value = conversationId;
+    await router.push({
+        name: 'conversation',
+        params: {
+            conversationId,
+        },
+    });
+
     await chatStore.setActiveConversationId(conversationId);
     await refreshMessages();
 };
@@ -181,12 +200,19 @@ const ensureConversation = async (): Promise<ChatConversation> => {
     }
 
     const conversation = await chatStore.createConversation({
+        id: chatStore.createId(),
         title: createConversationTitle(),
         model: selectedModelName.value || settings.value.model || null,
         systemMessage: '',
     });
 
-    activeConversationId.value = conversation.id;
+    await router.push({
+        name: 'conversation',
+        params: {
+            conversationId: conversation.id,
+        },
+    });
+
     await chatStore.setActiveConversationId(conversation.id);
     await refreshConversationList();
 
@@ -296,19 +322,18 @@ const saveConversationSystemMessage = async () => {
 const removeConversation = async (conversationId: string) => {
     await chatStore.deleteConversation(conversationId);
 
-    if (activeConversationId.value === conversationId) {
-        activeConversationId.value = null;
+    if (routeConversationId.value === conversationId) {
         messages.value = [];
     }
 
     await refreshConversationList();
 
-    if (!activeConversationId.value && conversations.value.length > 0) {
+    if (!routeConversationId.value && conversations.value.length > 0) {
         await openConversation(conversations.value[0].id);
         return;
     }
 
-    if (!activeConversationId.value) {
+    if (!routeConversationId.value) {
         await createNewConversation();
     }
 };
@@ -419,25 +444,50 @@ onMounted(async () => {
     await loadModels();
     await refreshConversationList();
 
+    const routeModel = String(route.query.model || '').trim();
+    const routePrompt = String(route.query.prompt || route.query.q || '').trim();
     const storedConversationId = await chatStore.getActiveConversationId();
 
-    if (storedConversationId) {
-        activeConversationId.value = storedConversationId;
-        await refreshMessages();
+    if (routeModel) {
+        settings.value = {
+            ...settings.value,
+            model: routeModel,
+        };
     }
 
-    if (!activeConversationId.value) {
-        if (conversations.value.length > 0) {
-            activeConversationId.value = conversations.value[0].id;
-            await chatStore.setActiveConversationId(activeConversationId.value);
+    if (routeConversationId.value) {
+        const conversation = await chatStore.getConversation(routeConversationId.value);
+
+        if (conversation) {
+            await chatStore.setActiveConversationId(conversation.id);
             await refreshMessages();
-        } else {
-            await createNewConversation();
         }
+    } else if (storedConversationId) {
+        const storedConversation = await chatStore.getConversation(storedConversationId);
+
+        if (storedConversation) {
+            await openConversation(storedConversation.id);
+        }
+    } else if (conversations.value.length > 0) {
+        await openConversation(conversations.value[0].id);
+    } else {
+        await createNewConversation();
     }
 
     if (activeConversation.value) {
         conversationSystemDraft.value = activeConversation.value.systemMessage || '';
+    }
+
+    if (routePrompt) {
+        input.value = routePrompt;
+        await nextTick();
+        await sendMessage();
+        await router.replace({
+            name: 'conversation',
+            params: {
+                conversationId: routeConversationId.value || activeConversation.value?.id,
+            },
+        });
     }
 
     await nextTick();
@@ -502,9 +552,9 @@ onMounted(async () => {
                                 :class="[
                                     'group w-full rounded-2xl border px-3 py-3 text-left transition',
                                     {
-                                        'border-blue-400/40 bg-blue-500/15': conversation.id === activeConversationId,
+                                        'border-blue-400/40 bg-blue-500/15': conversation.id === routeConversationId,
                                         'border-white/10 bg-white/5 hover:bg-white/8':
-                                            conversation.id !== activeConversationId,
+                                            conversation.id !== routeConversationId,
                                     },
                                 ]"
                             >
@@ -583,7 +633,7 @@ onMounted(async () => {
                         <div class="flex flex-wrap gap-2">
                             <button
                                 type="button"
-                                @click="settingsOpen = !settingsOpen"
+                                @click="router.push({ name: 'settings' })"
                                 class="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-slate-200 transition hover:bg-white/10"
                             >
                                 Configurações
@@ -774,7 +824,7 @@ onMounted(async () => {
                     </div>
                 </section>
 
-                <div v-if="settingsOpen" class="absolute inset-0 z-20 bg-black/50 p-4 backdrop-blur-sm">
+                <div v-if="route.name === 'settings' || settingsOpen" class="absolute inset-0 z-20 bg-black/50 p-4 backdrop-blur-sm">
                     <div
                         class="mx-auto mt-8 w-full max-w-2xl rounded-3xl border border-white/10 bg-[#0f1726] p-6 shadow-2xl"
                     >
@@ -785,7 +835,13 @@ onMounted(async () => {
                             </div>
                             <button
                                 type="button"
-                                @click="settingsOpen = false"
+                                @click="
+                                    router.push(
+                                        routeConversationId
+                                            ? { name: 'conversation', params: { conversationId: routeConversationId } }
+                                            : { name: 'home' },
+                                    )
+                                "
                                 class="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-200"
                             >
                                 Fechar
@@ -829,7 +885,13 @@ onMounted(async () => {
                         <div class="mt-6 flex justify-end gap-3">
                             <button
                                 type="button"
-                                @click="settingsOpen = false"
+                                @click="
+                                    router.push(
+                                        routeConversationId
+                                            ? { name: 'conversation', params: { conversationId: routeConversationId } }
+                                            : { name: 'home' },
+                                    )
+                                "
                                 class="rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-slate-200"
                             >
                                 Cancelar
